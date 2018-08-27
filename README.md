@@ -1,4 +1,6 @@
-# Java SDK for Hyperledger Fabric 1.3
+# Android Java SDK for Hyperledger Fabric 1.3
+### With this project you can run Fabric Java SDK on your Android device 
+
 Welcome to Java SDK for Hyperledger project. The SDK helps facilitate Java applications to manage the lifecycle of
  Hyperledger channels  and user chaincode. The SDK also provides a means to execute
   user chaincode, query blocks

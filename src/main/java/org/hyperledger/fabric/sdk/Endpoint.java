@@ -23,7 +23,9 @@ import java.lang.reflect.InvocationTargetException;
 import java.lang.reflect.Method;
 import java.nio.file.Files;
 import java.nio.file.Paths;
+import java.security.KeyStore;
 import java.security.PrivateKey;
+import java.security.cert.CertificateFactory;
 import java.security.cert.X509Certificate;
 import java.util.AbstractMap;
 import java.util.Base64;
@@ -34,7 +36,8 @@ import java.util.Properties;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
-import javax.net.ssl.SSLException;
+import javax.net.ssl.*;
+import javax.security.auth.x500.X500Principal;
 
 import com.google.common.collect.ImmutableMap;
 import io.grpc.ManagedChannelBuilder;
@@ -62,6 +65,9 @@ import static java.lang.String.format;
 import static java.nio.charset.StandardCharsets.UTF_8;
 import static org.hyperledger.fabric.sdk.helper.Utils.parseGrpcUrl;
 
+import io.grpc.okhttp.internal.Platform;
+import io.grpc.okhttp.OkHttpChannelBuilder;
+
 class Endpoint {
     private static final Log logger = LogFactory.getLog(Endpoint.class);
 
@@ -73,7 +79,7 @@ class Endpoint {
     private final String url;
     private byte[] clientTLSCertificateDigest;
     private byte[] tlsClientCertificatePEMBytes;
-    private NettyChannelBuilder channelBuilder = null;
+    private OkHttpChannelBuilder channelBuilder = null;
 
     private static final Map<String, String> CN_CACHE = Collections.synchronizedMap(new HashMap<>());
 
@@ -237,34 +243,32 @@ class Endpoint {
 
         try {
             if (protocol.equalsIgnoreCase("grpc")) {
-                this.channelBuilder = NettyChannelBuilder.forAddress(addr, port).usePlaintext(true);
+                this.channelBuilder = OkHttpChannelBuilder.forAddress(addr, port).usePlaintext(true);
                 addNettyBuilderProps(channelBuilder, properties);
             } else if (protocol.equalsIgnoreCase("grpcs")) {
                 if (pemBytes == null) {
                     // use root certificate
-                    this.channelBuilder = NettyChannelBuilder.forAddress(addr, port);
+                    this.channelBuilder = OkHttpChannelBuilder.forAddress(addr, port);
                     addNettyBuilderProps(channelBuilder, properties);
                 } else {
                     try {
 
                         logger.trace(format("Endpoint %s Negotiation type: '%s', SSLprovider: '%s'", url, nt, sslp));
                         SslProvider sslprovider = sslp.equals("openSSL") ? SslProvider.OPENSSL : SslProvider.JDK;
-                        NegotiationType ntype = nt.equals("TLS") ? NegotiationType.TLS : NegotiationType.PLAINTEXT;
+                        io.grpc.okhttp.NegotiationType ntype = nt.equals("TLS") ? io.grpc.okhttp.NegotiationType.TLS : io.grpc.okhttp.NegotiationType.PLAINTEXT;
 
-                        SslContextBuilder clientContextBuilder = getSslContextBuilder(clientCert, clientKey, sslprovider);
-                        SslContext sslContext;
+                        //SslContextBuilder clientContextBuilder = getSslContextBuilder(clientCert, clientKey, sslprovider);
+                        SSLSocketFactory factory;
 
                         logger.trace(format("Endpoint %s  final server pemBytes: %s", url, Hex.encodeHexString(pemBytes)));
 
                         try (InputStream myInputStream = new ByteArrayInputStream(pemBytes)) {
-                            sslContext = clientContextBuilder
-                                    .trustManager(myInputStream)
-                                    .build();
+                            factory = getSslSocketFactory(myInputStream);
                         }
 
-                        channelBuilder = NettyChannelBuilder
+                        channelBuilder = OkHttpChannelBuilder
                                 .forAddress(addr, port)
-                                .sslContext(sslContext)
+                                .sslSocketFactory(factory)
                                 .negotiationType(ntype);
 
                         if (cn != null) {
@@ -290,7 +294,32 @@ class Endpoint {
         }
     }
 
-    SslContextBuilder getSslContextBuilder(X509Certificate[] clientCert, PrivateKey clientKey, SslProvider sslprovider) {
+    private static SSLSocketFactory getSslSocketFactory(InputStream testCa)
+            throws Exception {
+        if (testCa == null) {
+            return (SSLSocketFactory) SSLSocketFactory.getDefault();
+        }
+
+        SSLContext context = SSLContext.getInstance("TLS");
+        context.init(null, getTrustManagers(testCa) , null);
+        return context.getSocketFactory();
+    }
+
+    private static TrustManager[] getTrustManagers(InputStream testCa) throws Exception {
+        KeyStore ks = KeyStore.getInstance(KeyStore.getDefaultType());
+        ks.load(null);
+        CertificateFactory cf = CertificateFactory.getInstance("X.509");
+        X509Certificate cert = (X509Certificate) cf.generateCertificate(testCa);
+        X500Principal principal = cert.getSubjectX500Principal();
+        ks.setCertificateEntry(principal.getName("RFC2253"), cert);
+        // Set up trust manager factory to use our key store.
+        TrustManagerFactory trustManagerFactory =
+                TrustManagerFactory.getInstance(TrustManagerFactory.getDefaultAlgorithm());
+        trustManagerFactory.init(ks);
+        return trustManagerFactory.getTrustManagers();
+    }
+
+   /* SslContextBuilder getSslContextBuilder(X509Certificate[] clientCert, PrivateKey clientKey, SslProvider sslprovider) {
         SslContextBuilder clientContextBuilder = GrpcSslContexts.configure(SslContextBuilder.forClient(), sslprovider);
         if (clientKey != null && clientCert != null) {
             clientContextBuilder = clientContextBuilder.keyManager(clientKey, clientCert);
@@ -298,7 +327,7 @@ class Endpoint {
             logger.debug(format("Endpoint %s with no ssl context", url));
         }
         return clientContextBuilder;
-    }
+    }*/
 
     byte[] getClientTLSCertificateDigest() {
         //The digest must be SHA256 over the DER encoded certificate. The PEM has the exact DER sequence in hex encoding around the begin and end markers
@@ -325,7 +354,7 @@ class Endpoint {
             .put(Double.class, double.class).put(Float.class, float.class).put(Integer.class, int.class)
             .put(Long.class, long.class).put(Short.class, short.class).put(Void.class, void.class).build();
 
-    private void addNettyBuilderProps(NettyChannelBuilder channelBuilder, Properties props)
+    private void addNettyBuilderProps(OkHttpChannelBuilder channelBuilder, Properties props)
             throws NoSuchMethodException, InvocationTargetException, IllegalAccessException {
 
         if (props == null) {
